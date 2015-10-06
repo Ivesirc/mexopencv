@@ -41,11 +41,6 @@ function make(varargin)
 % See also mex
 %
 
-if isOctave
-    setenv('CFLAGS', '-fpermissive');
-    setenv('CXXFLAGS', '-fpermissive');
-end
-
 MEXOPENCV_ROOT = mexopencv.root();
 
 % navigate to directory
@@ -99,15 +94,9 @@ if ispc % Windows
     % compile flags
     [cv_cflags,cv_libs] = pkg_config(opts);
     [comp_flags,link_flags] = compilation_flags(opts);
-    if isOctave
-        mex_flags = sprintf('%s %s -I''%s'' %s %s',...
-            comp_flags, link_flags, fullfile(MEXOPENCV_ROOT,'include'), ...
-            cv_cflags, cv_libs);
-    else
-        mex_flags = sprintf('-largeArrayDims %s %s -I''%s'' %s %s',...
-            comp_flags, link_flags, fullfile(MEXOPENCV_ROOT,'include'), ...
-            cv_cflags, cv_libs);
-    end
+    mex_flags = sprintf('-largeArrayDims %s %s -I''%s'' %s %s',...
+        comp_flags, link_flags, fullfile(MEXOPENCV_ROOT,'include'), ...
+        cv_cflags, cv_libs);
     if opts.verbose > 1
         mex_flags = ['-v ' mex_flags];    % verbose mex output
     elseif opts.verbose == 0 && ~verLessThan('matlab', '8.3')
@@ -117,31 +106,35 @@ if ispc % Windows
         mex_flags = ['-g ' mex_flags];    % debug vs. optimized builds
     end
 
-    % Compile MxArray
-    src = fullfile(MEXOPENCV_ROOT,'src','MxArray.cpp');
-    dst = fullfile(MEXOPENCV_ROOT,'lib','MxArray.obj');
-    if compile_needed(src, dst) || opts.force
-        if isOctave
-            cmd = sprintf('mex %s -c ''%s'' -o ''%s''', ...
-                mex_flags, src, dst);
-        else
+    % Compile MxArray AND OTHER CLASSES USING OPEN CV
+    %src = fullfile(MEXOPENCV_ROOT,'src','MxArray.cpp');
+    %dst = fullfile(MEXOPENCV_ROOT,'lib','MxArray.obj');
+    srcs = dir( fullfile(MEXOPENCV_ROOT,'src','*.cpp') );
+    [~,srcs] = cellfun(@fileparts, {srcs.name}, 'UniformOutput',false);
+    for i=1:numel(srcs)
+        src = fullfile(MEXOPENCV_ROOT,'src',[srcs{i} '.cpp']);
+        dst = fullfile(MEXOPENCV_ROOT,'lib',srcs{i});
+        fulldst = [dst, '.obj'];
+        if compile_needed(src, fulldst) || opts.force
             cmd = sprintf('mex %s -c ''%s'' -outdir ''%s''', ...
                 mex_flags, src, fileparts(dst));
+            if opts.verbose > 0, disp(cmd); end
+            if ~opts.dryrun, eval(cmd); end
+            opts.force = true;
+        else
+            if opts.verbose > 0
+                fprintf('Skipped "%s"\n', src);
+            end
         end
-        if opts.verbose > 0, disp(cmd); end
-        if ~opts.dryrun, eval(cmd); end
-        opts.force = true;
-    else
-        if opts.verbose > 0
-            fprintf('Skipped "%s"\n', src);
+        if ~exist(fulldst, 'file') && ~opts.dryrun
+        error('mexopencv:make', '"%s" not found', fulldst);
         end
     end
-    if ~exist(dst, 'file') && ~opts.dryrun
-        error('mexopencv:make', '"%s" not found', dst);
-    end
+    
 
     % Compile other MEX files
-    obj = fullfile(MEXOPENCV_ROOT,'lib','MxArray.obj');
+    %obj = fullfile(MEXOPENCV_ROOT,'lib','MxArray.obj');
+    objs = dir( fullfile(MEXOPENCV_ROOT,'lib','*.obj') );
     srcs = dir( fullfile(MEXOPENCV_ROOT,'src','+cv','*.cpp') );
     [~,srcs] = cellfun(@fileparts, {srcs.name}, 'UniformOutput',false);
     psrcs = dir( fullfile(MEXOPENCV_ROOT,'src','+cv','private','*.cpp'));
@@ -151,6 +144,10 @@ if ispc % Windows
     if opts.progressbar
         hWait = waitbar(0, 'Compiling MEX files...');
     end
+    objstr = fullfile(MEXOPENCV_ROOT,'lib', objs(1).name);
+    for i = 2:numel(objs)
+        objstr = sprintf('''%s'' ''%s''',objstr, fullfile(MEXOPENCV_ROOT,'lib', objs(i).name)) ;
+    end
     for i = 1:numel(srcs)
         if opts.progressbar
             waitbar(i/numel(srcs), hWait);
@@ -159,13 +156,8 @@ if ispc % Windows
         dst = fullfile(MEXOPENCV_ROOT,'+cv',srcs{i});
         fulldst = [dst, '.', mexext];
         if compile_needed(src, fulldst) || opts.force
-            if isOctave
-                cmd = sprintf('mex %s ''%s'' ''%s'' -o ''%s''',...
-                    mex_flags, src, obj, dst);
-            else
-                cmd = sprintf('mex %s ''%s'' ''%s'' -output ''%s''',...
-                    mex_flags, src, obj, dst);
-            end
+            cmd = sprintf('mex %s ''%s'' %s -output ''%s''',...
+                mex_flags, src, objstr, dst);
             if opts.verbose > 0, disp(cmd); end
             if ~opts.dryrun, eval(cmd); end
         else
@@ -204,11 +196,7 @@ end
 function [cflags,libs] = pkg_config(opts)
     %PKG_CONFIG  constructs OpenCV-related option flags for Windows
     I_path = fullfile(opts.opencv_path,'include');
-    if isOctave
-        L_path = fullfile(opts.opencv_path,arch_str(),compiler_str(),'bin');
-    else
-        L_path = fullfile(opts.opencv_path,arch_str(),compiler_str(),'lib');
-    end  
+    L_path = fullfile(opts.opencv_path,arch_str(),compiler_str(),'lib');
     l_options = strcat({' -l'}, lib_names(L_path));
     if opts.debug
         l_options = strcat(l_options,'d');    % link against debug binaries
@@ -228,7 +216,7 @@ end
 
 function s = arch_str()
     %ARCH_STR  return architecture used in mex
-    if xor(isempty(strfind(mexext, '64')), isOctave && ~isempty(strfind(computer, 'x86_64')))
+    if isempty(strfind(mexext, '64'))
         s = 'x86';
     else
         s = 'x64';
@@ -237,47 +225,43 @@ end
 
 function s = compiler_str()
     %COMPILER_STR  return compiler shortname
-    if isOctave
-        s = 'mingw';
-    else
-        s = '';
-        cc = mex.getCompilerConfigurations('C++', 'Selected');
-        if strcmp(cc.Manufacturer, 'Microsoft')
-            if ~isempty(strfind(cc.Name, 'Visual'))  % Visual Studio
-                switch cc.Version
-                    case '12.0'
-                        s = 'vc12';    % VS2013
-                    case '11.0'
-                        s = 'vc11';    % VS2012
-                    case '10.0'
-                        s = 'vc10';    % VS2010
-                    case '9.0'
-                        s = 'vc9';     % VS2008
-                    case '8.0'
-                        s = 'vc8';     % VS2005
-                end
-            elseif ~isempty(strfind(cc.Name, 'SDK'))  % Windows SDK
-                switch cc.Version
-                    case '8.1'
-                        s = 'vc12';    % VS2013
-                    case '8.0'
-                        s = 'vc11';    % VS2012
-                    case '7.1'
-                        s = 'vc10';    % VS2010
-                    case {'7.0', '6.1'}
-                        s = 'vc9';     % VS2008
-                    case '6.0'
-                        s = 'vc8';     % VS2005
-                end
+    s = '';
+    cc = mex.getCompilerConfigurations('C++', 'Selected');
+    if strcmp(cc.Manufacturer, 'Microsoft')
+        if ~isempty(strfind(cc.Name, 'Visual'))  % Visual Studio
+            switch cc.Version
+                case '12.0'
+                    s = 'vc12';    % VS2013
+                case '11.0'
+                    s = 'vc11';    % VS2012
+                case '10.0'
+                    s = 'vc10';    % VS2010
+                case '9.0'
+                    s = 'vc9';     % VS2008
+                case '8.0'
+                    s = 'vc8';     % VS2005
             end
-        elseif strcmp(cc.Manufacturer, 'Intel')  % Intel C++ Composer
-            % TODO: check versions 11.0, 12.0, 13.0, 14.0, 15.0
-        elseif ~isempty(strfind(cc.Name, 'GNU'))  % MinGW (GNU GCC)
-            s = 'mingw';
+        elseif ~isempty(strfind(cc.Name, 'SDK'))  % Windows SDK
+            switch cc.Version
+                case '8.1'
+                    s = 'vc12';    % VS2013
+                case '8.0'
+                    s = 'vc11';    % VS2012
+                case '7.1'
+                    s = 'vc10';    % VS2010
+                case {'7.0', '6.1'}
+                    s = 'vc9';     % VS2008
+                case '6.0'
+                    s = 'vc8';     % VS2005
+            end
         end
-        if isempty(s)
-            error('mexopencv:make', 'Unsupported compiler: %s', cc.Name);
-        end
+    elseif strcmp(cc.Manufacturer, 'Intel')  % Intel C++ Composer
+        % TODO: check versions 11.0, 12.0, 13.0, 14.0, 15.0
+    elseif ~isempty(strfind(cc.Name, 'GNU'))  % MinGW (GNU GCC)
+        s = 'mingw';
+    end
+    if isempty(s)
+        error('mexopencv:make', 'Unsupported compiler: %s', cc.Name);
     end
 end
 
@@ -290,12 +274,8 @@ function [comp_flags,link_flags] = compilation_flags(opts)
 
     % override _SECURE_SCL for VS versions prior to VS2010,
     % or when linking against debug OpenCV binaries
-    if isOctave
-      isVS = false;
-    else
-      c = mex.getCompilerConfigurations('C++','Selected');
-      isVS = strcmp(c.Manufacturer,'Microsoft') && ~isempty(strfind(c.Name,'Visual'));
-    end
+    c = mex.getCompilerConfigurations('C++','Selected');
+    isVS = strcmp(c.Manufacturer,'Microsoft') && ~isempty(strfind(c.Name,'Visual'));
     if isVS && (str2double(c.Version) < 10 || opts.debug)
         comp_flags{end+1} = '/D_SECURE_SCL=1';
     end
@@ -322,13 +302,8 @@ end
 
 function l = lib_names(L_path)
     %LIB_NAMES  return library names
-    if isOctave
-        d = dir( fullfile(L_path,'*opencv_*.dll') );
-        l = regexp({d.name}, '(opencv_.+)\.dll', 'tokens', 'once');
-    else
-        d = dir( fullfile(L_path,'opencv_*d.lib') );
-        l = regexp({d.name}, '(opencv_.+)d\.lib', 'tokens', 'once');
-    end
+    d = dir( fullfile(L_path,'opencv_*d.lib') );
+    l = regexp({d.name}, '(opencv_.+)d\.lib', 'tokens', 'once');
     l = [l{:}];
 end
 
@@ -391,7 +366,7 @@ function opts = getargs(varargin)
     %GETARGS  Process parameter name/value pairs
 
     % default values
-    opts.opencv_path = 'C:\opencv';  % OpenCV location
+    opts.opencv_path = 'C:\OpenCV\opencv\build';  % OpenCV location
     opts.clean = false;              % clean mode
     opts.test = false;               % unittest mode
     opts.dryrun = false;             % dry run mode
@@ -433,17 +408,4 @@ function opts = getargs(varargin)
                 error('mexopencv:make', 'Invalid parameter name:  %s.', pname);
         end
     end
-end
-
-%%
-%% Return: true if the environment is Octave.
-%%
-function retval = isOctave
-    persistent cacheval;  % speeds up repeated calls
-
-    if isempty (cacheval)
-        cacheval = (exist ('OCTAVE_VERSION', 'builtin') > 0);
-    end
-
-    retval = cacheval;
 end
